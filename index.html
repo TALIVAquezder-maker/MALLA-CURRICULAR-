@@ -55,6 +55,9 @@
             border-radius: 6px; font-size: 1.1rem; font-weight: bold; cursor: pointer; transition: background-color 0.3s; margin-top: 10px;
         }
         .btn-login:hover { background-color: #5e1519; }
+        .btn-login:disabled { background-color: #ccc; cursor: not-allowed; }
+
+        #login-error { color: var(--uagrm-rojo); font-size: 0.9rem; margin-top: 15px; font-weight: bold; }
 
         /* --- PANTALLA PRINCIPAL (MALLA) --- */
         #app-section { display: none; }
@@ -162,7 +165,7 @@
                 <h3>Facultad de Ciencias Jurídicas, Políticas, Sociales y RR.II.</h3>
                 <h4>Carrera de Derecho</h4>
             </div>
-            <form id="loginForm" onsubmit="iniciarSesion(event)">
+            <form id="loginForm" onsubmit="window.iniciarSesion(event)">
                 <div class="form-group">
                     <label for="usuario">Usuario / Registro</label>
                     <input type="text" id="usuario" placeholder="Ingrese su número de registro" required>
@@ -171,7 +174,8 @@
                     <label for="password">Contraseña</label>
                     <input type="password" id="password" placeholder="Ingrese su contraseña" required>
                 </div>
-                <button type="submit" class="btn-login">Ingresar al Sistema</button>
+                <button type="submit" class="btn-login" id="btn-login">Ingresar al Sistema</button>
+                <div id="login-error"></div>
             </form>
         </div>
     </div>
@@ -214,7 +218,7 @@
     <!-- MODAL DE MATERIAS -->
     <div id="modalMateria" class="modal">
         <div class="modal-content">
-            <span class="cerrar" onclick="cerrarModal()">&times;</span>
+            <span class="cerrar" onclick="window.cerrarModal()">&times;</span>
             <h3 id="modalCodigoNombre"></h3>
             <p id="modalDetalles"></p>
             <p id="modalPreReqs" style="color: var(--uagrm-rojo); font-weight: bold; font-size: 0.9em; margin-top: 10px;"></p>
@@ -225,21 +229,52 @@
             </div>
 
             <div class="botones" id="grupoBotones">
-                <button class="btn btn-guardar" onclick="guardarNota()">Guardar Nota</button>
-                <button class="btn btn-limpiar" onclick="borrarNota()">Borrar</button>
+                <button class="btn btn-guardar" onclick="window.guardarNota()">Guardar Nota</button>
+                <button class="btn btn-limpiar" onclick="window.borrarNota()">Borrar</button>
             </div>
+            <div id="modal-error" style="color: var(--uagrm-rojo); font-size: 0.85em; margin-top: 10px; text-align: center;"></div>
         </div>
     </div>
 
-    <script>
-        function iniciarSesion(e) {
-            e.preventDefault();
-            const usuario = document.getElementById('usuario').value;
-            document.getElementById('login-section').style.display = 'none';
-            document.getElementById('app-section').style.display = 'block';
-            document.getElementById('bienvenida-usuario').innerText = `Estudiante: ${usuario} | Gestión Académica`;
-            renderizarMalla();
-        }
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Configuración de base de datos en la nube (Cloud Firestore)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            projectId: "proyecto-demo", // Fallback seguro
+        };
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        let currentUser = null;
+        let registroActual = null;
+        let notasGuardadas = {};
+        let materiaActual = null;
+
+        // Inicializar autenticación silenciosa para usar la base de datos
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (e) {
+                console.error("Error de conexión:", e);
+            }
+        };
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user && document.getElementById('login-error').innerText.includes("Conectando")) {
+                document.getElementById('login-error').innerText = "";
+            }
+        });
 
         const planEstudios = [
             // PRIMER AÑO
@@ -291,14 +326,59 @@
             { cod: 'DER506', nom: 'MÉTOD. ALTERNATIVOS DE RESOLU. DE CONFLICTOS.', cr: 6, ht: 2, hp: 2, pre: ['DER407'], anio: 5 }
         ];
 
-        let notasGuardadas = JSON.parse(localStorage.getItem('notasDerecho157')) || {};
-        let materiaActual = null;
+        window.iniciarSesion = async function(e) {
+            e.preventDefault();
+            if (!currentUser) {
+                document.getElementById('login-error').innerText = "Conectando al servidor, aguarde unos segundos...";
+                return;
+            }
+            
+            const btn = document.getElementById('btn-login');
+            btn.disabled = true;
+            btn.innerText = "Cargando datos...";
+
+            const usuario = document.getElementById('usuario').value.trim();
+            registroActual = usuario;
+
+            try {
+                // Cargar datos de la nube
+                const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'mallas', registroActual);
+                const docSnap = await getDoc(docRef);
+                
+                if (docSnap.exists() && docSnap.data().notas) {
+                    notasGuardadas = docSnap.data().notas;
+                } else {
+                    notasGuardadas = {}; // Usuario nuevo o sin notas
+                }
+
+                document.getElementById('login-section').style.display = 'none';
+                document.getElementById('app-section').style.display = 'block';
+                document.getElementById('bienvenida-usuario').innerText = `Estudiante: ${usuario} | Gestión Académica`;
+                
+                renderizarMalla();
+            } catch (error) {
+                console.error(error);
+                document.getElementById('login-error').innerText = "Hubo un error al cargar. Intente de nuevo.";
+                btn.disabled = false;
+                btn.innerText = "Ingresar al Sistema";
+            }
+        };
+
+        async function sincronizarNube() {
+            if (!currentUser || !registroActual) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'mallas', registroActual);
+                await setDoc(docRef, { notas: notasGuardadas }, { merge: true });
+                document.getElementById('modal-error').innerText = "";
+            } catch (error) {
+                console.error("Error al guardar en la nube:", error);
+                document.getElementById('modal-error').innerText = "Error al guardar en la nube.";
+            }
+        }
 
         function calcularPPAs() {
-            let sumProdConCero = 0;
-            let sumCredConCero = 0;
-            let sumProdSinCero = 0;
-            let sumCredSinCero = 0;
+            let sumProdConCero = 0; let sumCredConCero = 0;
+            let sumProdSinCero = 0; let sumCredSinCero = 0;
 
             for (const cod in notasGuardadas) {
                 const nota = notasGuardadas[cod];
@@ -306,12 +386,9 @@
                 
                 if (materia) {
                     const creditos = materia.cr;
-                    
-                    // PPA y PPAC: Incluyen TODAS las materias cursadas (incluso aplazos/ceros)
                     sumProdConCero += (nota * creditos);
                     sumCredConCero += creditos;
 
-                    // PPASC: Excluye notas cero
                     if (nota > 0) {
                         sumProdSinCero += (nota * creditos);
                         sumCredSinCero += creditos;
@@ -319,7 +396,6 @@
                 }
             }
 
-            // En este sistema solo hay datos de 1 carrera, por ende PPA = PPAC
             const ppa = sumCredConCero > 0 ? (sumProdConCero / sumCredConCero).toFixed(2) : "0.00";
             const ppac = ppa; 
             const ppasc = sumCredSinCero > 0 ? (sumProdSinCero / sumCredSinCero).toFixed(2) : "0.00";
@@ -332,12 +408,9 @@
         function verificarEstado(mat) {
             let nota = notasGuardadas[mat.cod];
             let aprobada = nota !== undefined && nota >= 51;
-            
-            // Los pre-requisitos deben estar APROBADOS (>=51)
             let preReqAprobados = mat.pre.every(reqCod => notasGuardadas[reqCod] !== undefined && notasGuardadas[reqCod] >= 51);
             
             if (aprobada) return 'aprobada';
-            // Si la nota está registrada pero es menor a 51, o si cumple prerequisitos
             if ((nota !== undefined && nota < 51) || preReqAprobados) return 'disponible';
             return 'bloqueada';
         }
@@ -358,12 +431,11 @@
                 materiasAnio.forEach(mat => {
                     let estado = verificarEstado(mat);
                     let nota = notasGuardadas[mat.cod];
-                    
                     let badgeClass = nota !== undefined && nota < 51 ? 'nota-badge reprobada' : 'nota-badge';
                     
                     let matDiv = document.createElement('div');
                     matDiv.className = `materia ${estado}`;
-                    matDiv.onclick = () => abrirModal(mat, estado);
+                    matDiv.onclick = () => window.abrirModal(mat, estado);
                     
                     matDiv.innerHTML = `
                         <div class="header-mat">
@@ -388,10 +460,11 @@
 
         const modal = document.getElementById('modalMateria');
 
-        function abrirModal(mat, estado) {
+        window.abrirModal = function(mat, estado) {
             materiaActual = mat;
             document.getElementById('modalCodigoNombre').innerText = `${mat.cod} - ${mat.nom}`;
             document.getElementById('modalDetalles').innerText = `Créditos: ${mat.cr} | Horas Teóricas: ${mat.ht} | Horas Prácticas: ${mat.hp}`;
+            document.getElementById('modal-error').innerText = "";
             
             let reqsText = mat.pre.length > 0 ? `Pre-requisitos: ${mat.pre.join(', ')}` : 'Sin pre-requisitos';
             document.getElementById('modalPreReqs').innerText = reqsText;
@@ -409,34 +482,36 @@
             modal.style.display = 'flex';
         }
 
-        function cerrarModal() {
+        window.cerrarModal = function() {
             modal.style.display = 'none';
             materiaActual = null;
         }
 
-        function guardarNota() {
+        window.guardarNota = async function() {
             let nota = parseInt(document.getElementById('inputNota').value);
             if (isNaN(nota) || nota < 0 || nota > 100) {
-                alert('Ingresa una nota válida entre 0 y 100.');
+                document.getElementById('modal-error').innerText = 'Ingresa una nota válida entre 0 y 100.';
                 return;
             }
             notasGuardadas[materiaActual.cod] = nota;
-            localStorage.setItem('notasDerecho157', JSON.stringify(notasGuardadas));
-            cerrarModal();
-            renderizarMalla();
+            renderizarMalla(); // Actualiza visualmente rápido
+            window.cerrarModal();
+            await sincronizarNube(); // Guarda en Firebase
         }
 
-        function borrarNota() {
+        window.borrarNota = async function() {
             if (notasGuardadas[materiaActual.cod] !== undefined) {
                 delete notasGuardadas[materiaActual.cod];
-                localStorage.setItem('notasDerecho157', JSON.stringify(notasGuardadas));
+                renderizarMalla();
+                window.cerrarModal();
+                await sincronizarNube();
+            } else {
+                window.cerrarModal();
             }
-            cerrarModal();
-            renderizarMalla();
         }
 
-        window.onclick = function(event) { if (event.target == modal) cerrarModal(); }
-        document.getElementById('inputNota').addEventListener('keypress', function(e) { if (e.key === 'Enter') guardarNota(); });
+        window.onclick = function(event) { if (event.target == modal) window.cerrarModal(); }
+        document.getElementById('inputNota').addEventListener('keypress', function(e) { if (e.key === 'Enter') window.guardarNota(); });
     </script>
 </body>
 </html>
